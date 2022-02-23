@@ -6,60 +6,58 @@ int SetNonBlocking(int fd) {
     return fcntl(fd, F_SETFL, fcntl(fd, F_GETFD, 0) | O_NONBLOCK);
 }
 
-WebServer::WebServer(int port): port_(port), isClosed_(false), epoller_(new Epoller()) {
-    // todo：获取资源目录、http、sql
+WebServer::WebServer(
+    int port, int trigMode, int timeoutMS, bool optLinger, int threadNum): 
+    port_(port), timeoutMS_(timeoutMS), openLinger_(optLinger), isClosed_(false),
+    timer_(new HeapTimer()),threadpool_(new ThreadPool(threadNum)),epoller_(new Epoller()) 
+{
+    // 获取资源目录
     srcDir_ = getcwd(nullptr, 256);
     assert(srcDir_);
     strncat(srcDir_, "/resources/", 16);
     HttpConnection::userCount = 0;
     HttpConnection::srcDir = srcDir_;
 
-
-    listenEvent_ = EPOLLRDHUP | EPOLLET;  // todo: wait to change
+    InitEventMode(trigMode);
     if(!InitListenFd()) {
         isClosed_ = true;
     }
-    connEvent_ = EPOLLONESHOT | EPOLLRDHUP | EPOLLET;
 }
 
-// 疑惑：析构函数会被调用吗？
 WebServer::~WebServer() {
     close(listenFd_);
     free(srcDir_);
     isClosed_ = true;
-    // todo
 }
 
 void WebServer::StartService() {
-    int timeoutMs = -1;     // 无事件时, epollwait将阻塞
+    int timeout = -1;     // -1 无事件时, epollwait将阻塞
     while(!isClosed_) {
-        // todo: 更新超时时间
-        int ret = epoller_->EpollWait(timeoutMs);
-        for(int i = 0; i < ret; i++) {  // 处理事件
+        if(timeoutMS_ > 0) {
+            timeout = timer_->tick();
+        }
+        int eventCnt = epoller_->EpollWait(timeout);
+        for(int i = 0; i < eventCnt; i++) {
             int fd = epoller_->GetEventFd(i);
             uint32_t event = epoller_->GetEvent(i);
             if(fd == listenFd_) {
                 DealListen();
-                cout << "test：连接事件" << endl;
             }
             else if(event & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
                 assert(users_.count(fd) > 0);
                 CloseConn(&users_[fd]);
-                cout << "test：关闭事件" << endl;
-                // users_.erase(fd);
+                users_.erase(fd);
             }
             else if(event & EPOLLIN) {
                 assert(users_.count(fd) > 0);
                 DealRead(&users_[fd]);
-                cout << "test：可读事件" << endl;
             }
             else if(event & EPOLLOUT) {
                 assert(users_.count(fd) > 0);
                 DealWrite(&users_[fd]);
-                cout << "test：可写事件" << endl;
             }
             else {
-                // todo: log
+                cout << "Unexpected event" << endl;
             }
         }
     }
@@ -73,19 +71,32 @@ bool WebServer::InitListenFd() {
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port_);
-    // todo: 优雅关闭
 
     listenFd_ = socket(AF_INET, SOCK_STREAM, 0);
     if(listenFd_ < 0) {
         return false;
     }
-    // 设置端口复用
+
+    // 优雅关闭：当调用close时，不会立即关闭，将剩下的数据发送完毕或超时才关闭
+    struct linger optLinger = { 0 };
+    if(openLinger_) {
+        optLinger.l_onoff = 1;      // 1表示打开，0表示关闭
+        optLinger.l_linger = 1;     // 超时时间
+    }
+    int ret = setsockopt(listenFd_, SOL_SOCKET, SO_LINGER, &optLinger, sizeof(optLinger));
+    if(ret < 0) {
+        close(listenFd_);
+        return false;
+    }
+
+    // 设置端口复用：所有fd都可以正常发送数据，只有最后一个fd才可以正常接收数据
     int optval = 1;
-    int ret = setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, (const void*)&optval, sizeof(int));
+    ret = setsockopt(listenFd_, SOL_SOCKET, SO_REUSEADDR, (const void*)&optval, sizeof(int));
     if(ret == -1) {
         close(listenFd_);
         return false;
     }
+
     ret = bind(listenFd_, (struct sockaddr*)&addr, sizeof(addr));
     if(ret < 0) {
         close(listenFd_);
@@ -106,9 +117,33 @@ bool WebServer::InitListenFd() {
     return true;
 }
 
+void WebServer::InitEventMode(int trigMode) {
+    listenEvent_ = EPOLLRDHUP;
+    connEvent_ = EPOLLONESHOT | EPOLLRDHUP;
+    switch (trigMode)
+    {
+    case 0:
+        break;
+    case 1:
+        connEvent_ |= EPOLLET;
+        break;
+    case 2:
+        connEvent_ |= EPOLLET;
+        break;
+    case 3:
+        listenEvent_ |= EPOLLET;
+        connEvent_ |= EPOLLET;
+        break;
+    default:
+        listenEvent_ |= EPOLLET;
+        connEvent_ |= EPOLLET;
+        break;
+    }
+    // HTTPconnection::isET = (connEvent_ & EPOLLET);
+}
+
 void WebServer::CloseConn(HttpConnection* client) {
     assert(client);
-    // todo: log
     epoller_->DelFd(client->GetFd());
     client->Close();
 }
@@ -116,9 +151,11 @@ void WebServer::CloseConn(HttpConnection* client) {
 void WebServer::AddClient(int fd, sockaddr_in addr) {
     assert(fd > 0);
     users_[fd].Init(fd, addr);
+    if(timeoutMS_>0) {
+        timer_->add(fd, timeoutMS_, std::bind(&WebServer::CloseConn, this, &users_[fd]));
+    }
     epoller_->AddFd(fd, EPOLLIN | connEvent_);
     SetNonBlocking(fd);
-    // todo: log
 }
 
 void WebServer::DealListen() {
@@ -128,16 +165,41 @@ void WebServer::DealListen() {
         int fd = accept(listenFd_, (struct sockaddr*)&addr, &len);
         if(fd <= 0) return;
         if(HttpConnection::userCount >= MAX_FD) {
-            // todo
+            sendError(fd, "Server busy!");
             return;
         }
         AddClient(fd, addr);
     } while(listenEvent_ & EPOLLET);
 }
 
+void WebServer::sendError(int fd, const char* info)
+{
+    assert(fd>0);
+    send(fd, info, strlen(info), 0);
+    close(fd);
+}
+
 void WebServer::DealRead(HttpConnection* client) {
     assert(client);
-    // todo
+    extentTime(client);
+    threadpool_->submit(std::bind(&WebServer::OnRead, this, client));
+}
+
+void WebServer::DealWrite(HttpConnection* client) {
+    assert(client);
+    extentTime(client);
+    threadpool_->submit(std::bind(&WebServer::OnWrite, this, client));
+}
+
+void WebServer::extentTime(HttpConnection* client) {
+    assert(client);
+    if(timeoutMS_>0) {
+        timer_->reset(client->GetFd(), timeoutMS_);
+    }
+}
+
+void WebServer::OnRead(HttpConnection* client) {
+    assert(client);
     int ret = -1;
     int readErrno = 0;
     ret = client->read(&readErrno);         // 将数据读取到client(httpconn类)的buffer(类成员)里
@@ -148,15 +210,7 @@ void WebServer::DealRead(HttpConnection* client) {
     OnProcess(client);
 }
 
-void WebServer::OnProcess(HttpConnection* client) {
-    if(client->process()) {     // http请求解析
-        epoller_->ModFd(client->GetFd(), connEvent_ | EPOLLOUT);
-    } else {
-        epoller_->ModFd(client->GetFd(), connEvent_ | EPOLLIN);
-    }
-}
-
-void WebServer::DealWrite(HttpConnection* client) {
+void WebServer::OnWrite(HttpConnection* client) {
     assert(client);
     int ret = -1;
     int writeErrno = 0;
@@ -176,4 +230,12 @@ void WebServer::DealWrite(HttpConnection* client) {
         }
     }
     CloseConn(client);
+}
+
+void WebServer::OnProcess(HttpConnection* client) {
+    if(client->process()) {     // http请求解析
+        epoller_->ModFd(client->GetFd(), connEvent_ | EPOLLOUT);
+    } else {
+        epoller_->ModFd(client->GetFd(), connEvent_ | EPOLLIN);
+    }
 }

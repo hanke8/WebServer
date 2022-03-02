@@ -124,7 +124,6 @@ void HttpResponse::AddContent_(Buffer& buff) {
 
     /* 将文件映射到内存提高文件的访问速度 
         MAP_PRIVATE 建立一个写入时拷贝的私有映射*/
-    // log
     int* mmRet = (int*)mmap(0, mmFileStat_.st_size, PROT_READ, MAP_PRIVATE, srcFd, 0);
     if(*mmRet == -1) {
         ErrorContent(buff, "File NotFound!");

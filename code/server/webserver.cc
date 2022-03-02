@@ -139,7 +139,7 @@ void WebServer::InitEventMode(int trigMode) {
         connEvent_ |= EPOLLET;
         break;
     }
-    // HTTPconnection::isET = (connEvent_ & EPOLLET);
+    HttpConnection::isEpollET = (connEvent_ & EPOLLET);
 }
 
 void WebServer::CloseConn(HttpConnection* client) {

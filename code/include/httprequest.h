@@ -44,6 +44,7 @@ public:
     std::string GetPost(const char* key) const;
 
     bool IsKeepAlive() const;
+
 private:
     bool ParseRequestLine_(const std::string& line);
     void ParseHeader_(const std::string& line);
@@ -53,6 +54,7 @@ private:
     void ParsePost_();
     void ParseFromUrlencoded_();
 
+    static int ConverHex(char ch);
     static bool UserVerify(const std::string& name, const std::string& pwd, bool isLogin);
 
     PARSE_STATE state_;
@@ -62,7 +64,6 @@ private:
 
     static const std::unordered_set<std::string> DEFAULT_HTML;
     static const std::unordered_map<std::string, int> DEFAULT_HTML_TAG;
-    static int ConverHex(char ch);
 };
 
 #endif

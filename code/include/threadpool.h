@@ -1,41 +1,32 @@
 #ifndef THREADPOOL_H_
 #define THREADPOOL_H_
 
-#include <thread>
-#include <condition_variable>
-#include <mutex>
+#include <assert.h>
 #include <vector>
 #include <queue>
+#include <unordered_map>
+#include <functional>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 #include <future>
+using namespace std;
 
-class ThreadPool{
-private:
-    bool m_stop;
-    std::vector<std::thread>m_thread;
-    std::queue<std::function<void()>>tasks;
-    std::mutex m_mutex;
-    std::condition_variable m_cv;
-
+class ThreadPool {
 public:
-    explicit ThreadPool(size_t threadNumber):m_stop(false){
-        for(size_t i=0;i<threadNumber;++i)
-        {
-            m_thread.emplace_back(
-                [this](){
-                    for(;;)
-                    {
-                        std::function<void()>task;
-                        {
-                            std::unique_lock<std::mutex>lk(m_mutex);
-                            m_cv.wait(lk,[this](){ return m_stop||!tasks.empty();});
-                            if(m_stop&&tasks.empty()) return;
-                            task=std::move(tasks.front());
-                            tasks.pop();
-                        }
-                        task();
-                    }
-                }
-            );
+    ThreadPool(int size) {
+        assert(size > 0);
+        isClose_ = false;
+        free_ = tot_ = 0;
+        mxFree_ = size;
+
+        for(int i = 0; i < size; i++) {
+            {
+                unique_lock<mutex> lck(mtx_);
+                free_++;
+                tot_++;
+            }
+            increaseThread();
         }
     }
 
@@ -45,98 +36,76 @@ public:
     ThreadPool & operator=(const ThreadPool &) = delete;
     ThreadPool & operator=(ThreadPool &&) = delete;
 
-    ~ThreadPool(){
+    ~ThreadPool() {
         {
-            std::unique_lock<std::mutex>lk(m_mutex);
-            m_stop=true;
+            unique_lock<mutex> lck(mtx_);
+            isClose_ = true;
         }
-        m_cv.notify_all();
-        for(auto& threads:m_thread)
-        {
-            threads.join();
+        cond_.notify_all();
+        for(int i = 0; i < tot_; i++) {
+            threads_[i].join();
         }
     }
 
-    template<typename F,typename... Args>
-    auto submit(F&& f,Args&&... args)->std::future<decltype(f(args...))>{
-        auto taskPtr=std::make_shared<std::packaged_task<decltype(f(args...))()>>(
-            std::bind(std::forward<F>(f),std::forward<Args>(args)...)
+    // 该线程池，可处理任意长度，任意类型参数的任务
+    template<class F, class... Args>
+    auto submit(F&& f, Args&&... args)->decltype(f(args...)) {
+        function<decltype(f(args...))()> task = bind(forward<F>(f), forward<Args>(args)...);
+        auto taskPtr = make_shared<packaged_task<decltype(f(args...))()>>(task);
+        {
+            unique_lock<mutex> lck(mtx_);
+            tasks_.push(
+                [taskPtr]() {
+                    (*taskPtr)();
+                }
+            );
+            
+            if(free_ == 0) {
+                free_++;
+                tot_++;
+                increaseThread();
+            }
+        }
+        cond_.notify_one();
+        return taskPtr->get_future().get();
+    }
+
+private:
+    bool isClose_;
+    int free_, tot_, mxFree_;
+    mutex mtx_;
+    condition_variable cond_;
+    vector<thread> threads_;
+    unordered_map<thread::id, bool> isFree_;
+    queue<function<void()>> tasks_;
+
+    void increaseThread() {
+        threads_.emplace_back(
+            [this]() {
+                while(1) {
+                    function<void()> task;
+                    {
+                        unique_lock<mutex> lck(mtx_);
+                        cond_.wait(lck, [this]() {return isClose_ || !tasks_.empty();});
+                        if(isClose_ && tasks_.empty()) break;
+                        task = tasks_.front();
+                        tasks_.pop();
+                        free_--;
+                    }
+                    task();
+                    {
+                        unique_lock<mutex> lck(mtx_);
+                        free_++;
+                        if(free_ > mxFree_) {           // 减容
+                            free_--;
+                            return;
+                        }
+                    }
+                }
+            }
         );
-        {
-            std::unique_lock<std::mutex>lk(m_mutex);
-            if(m_stop) throw std::runtime_error("submit on stopped ThreadPool");
-            tasks.emplace([taskPtr](){ (*taskPtr)(); });
-        }
-        m_cv.notify_one();
-        return taskPtr->get_future();
-
     }
+
 };
 
 #endif
-
-// #ifndef THREADPOOL_H
-// #define THREADPOOL_H
-
-// #include <mutex>
-// #include <condition_variable>
-// #include <queue>
-// #include <thread>
-// #include <functional>
-// class ThreadPool {
-// public:
-//     explicit ThreadPool(size_t threadCount = 8): pool_(std::make_shared<Pool>()) {
-//             assert(threadCount > 0);
-//             for(size_t i = 0; i < threadCount; i++) {
-//                 std::thread([pool = pool_] {
-//                     std::unique_lock<std::mutex> locker(pool->mtx);
-//                     while(true) {
-//                         if(!pool->tasks.empty()) {
-//                             auto task = std::move(pool->tasks.front());
-//                             pool->tasks.pop();
-//                             locker.unlock();
-//                             task();
-//                             locker.lock();
-//                         } 
-//                         else if(pool->isClosed) break;
-//                         else pool->cond.wait(locker);
-//                     }
-//                 }).detach();
-//             }
-//     }
-
-//     ThreadPool() = default;
-
-//     ThreadPool(ThreadPool&&) = default;
-    
-//     ~ThreadPool() {
-//         if(static_cast<bool>(pool_)) {
-//             {
-//                 std::lock_guard<std::mutex> locker(pool_->mtx);
-//                 pool_->isClosed = true;
-//             }
-//             pool_->cond.notify_all();
-//         }
-//     }
-
-//     template<class F>
-//     void submit(F&& task) {
-//         {
-//             std::lock_guard<std::mutex> locker(pool_->mtx);
-//             pool_->tasks.emplace(std::forward<F>(task));
-//         }
-//         pool_->cond.notify_one();
-//     }
-
-// private:
-//     struct Pool {
-//         std::mutex mtx;
-//         std::condition_variable cond;
-//         bool isClosed;
-//         std::queue<std::function<void()>> tasks;
-//     };
-//     std::shared_ptr<Pool> pool_;
-// };
-
-
-// #endif //THREADPOOL_H

@@ -58,7 +58,6 @@ bool HttpRequest::parse(Buffer& buff) {
         }
         buff.RetrieveUntil(lineEnd + 2);
     }
-    // log
     return true;
 }
 
@@ -86,7 +85,6 @@ bool HttpRequest::ParseRequestLine_(const string& line) {
         state_ = HEADERS;
         return true;
     }
-    // log
     return false;
 }
 
@@ -103,7 +101,6 @@ void HttpRequest::ParseBody_(const string& line) {
     body_ = line;
     ParsePost_();
     state_ = FINISH;
-    // log
 }
 
 int HttpRequest::ConverHex(char ch) {
@@ -117,7 +114,6 @@ void HttpRequest::ParsePost_() {
         ParseFromUrlencoded_();
         if(DEFAULT_HTML_TAG.count(path_) != 0) {
             int tag = DEFAULT_HTML_TAG.find(path_)->second;
-            // log
             if(tag == 0 || tag == 1) {
                 bool isLogin = (tag == 1);
                 if(UserVerify(post_["username"], post_["password"], isLogin)) {
@@ -161,7 +157,6 @@ void HttpRequest::ParseFromUrlencoded_() {
             value = body_.substr(j, i - j);
             j = i + 1;
             post_[key] = value;
-            // log
             break;
         default:
             break;

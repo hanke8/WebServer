@@ -23,16 +23,14 @@ void HttpConnection::Init(int fd, const sockaddr_in& addr) {
     readBuff_.RetrieveAll();
     writeBuff_.RetrieveAll();
     isClosed_ = false;
-    // todo: log
 }
 
 void HttpConnection::Close() {
-    // todo: 解除内存映射
-    if(isClosed_ == false) {     // 防止不同线程重复关闭
+    response_.UnmapFile();
+    if(isClosed_ == false) {
         isClosed_ = true;
         userCount--;
         close(fd_);
-        // todo: log
     }
 }
 
@@ -81,7 +79,6 @@ bool HttpConnection::process() {
         return false;
     }
     else if(request_.parse(readBuff_)) {
-        // log
         response_.Init(srcDir, request_.path(), request_.IsKeepAlive(), 200);
     }
     else {
@@ -100,7 +97,6 @@ bool HttpConnection::process() {
         iov_[1].iov_len = response_.FileLen();
         iovCnt_ = 2;
     }
-    // log
     return true;
 }
 
